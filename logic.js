@@ -1,4 +1,7 @@
 (function () {
+  const indent = "\u00A0\u00A0\u00A0\u00A0"; // The 4 non-breaking spaces
+
+  // 1. Find the active field
   const editableRoot = (function walk(root) {
     const active = root.activeElement;
     if (!active) return null;
@@ -26,7 +29,6 @@
   let startLine = getTop(range.startContainer);
   let endLine = getTop(range.endContainer);
 
-  // Gutter/Offset fallback
   if (!startLine)
     startLine =
       editableRoot.childNodes[range.startOffset] || editableRoot.firstChild;
@@ -38,72 +40,81 @@
   const endIndex = allNodes.indexOf(endLine);
   if (startIndex === -1 || endIndex === -1) return;
 
-  const low = Math.min(startIndex, endIndex);
-  const high = Math.max(startIndex, endIndex);
-  const toProcess = allNodes.slice(low, high + 1);
+  const selectionScope = allNodes.slice(
+    Math.min(startIndex, endIndex),
+    Math.max(startIndex, endIndex) + 1,
+  );
 
-  const indent = "\u00A0\u00A0\u00A0\u00A0";
   let lastProcessed = null;
 
-  toProcess.forEach((node) => {
-    // 1. Remove Top-Level BRs (This stops the "Double Newline")
+  selectionScope.forEach((node) => {
     if (node.nodeName === "BR") {
       node.remove();
       return;
     }
 
-    // 2. Skip whitespace-only text
-    if (node.nodeType === 3 && !node.textContent.trim()) {
-      if (node !== startLine && node !== endLine) node.remove();
-      return;
-    }
-
-    // 3. Skip if already formatted
-    if (node.dataset?.ankiFmt) {
-      lastProcessed = node;
-      return;
-    }
-
-    // 4. Formatting
-    let newNode;
     if (node.nodeType === 3) {
-      // RAW TEXT NODE
-      newNode = document.createElement("div");
-      newNode.dataset.ankiFmt = "1";
-      // FORCE MARGIN 0 to keep lines tight
-      newNode.style.margin = "0";
-      newNode.style.padding = "0";
-      newNode.innerHTML = `${indent}<i>${node.textContent.replace(/[\n\r]/g, "")}</i>`;
-      node.parentNode.replaceChild(newNode, node);
-    } else {
-      // EXISTING ELEMENT
-      const cleaned = node.innerHTML
-        .replace(/<br\s*\/?>$/gi, "") // Remove internal trailing BR
-        .replace(/[\n\r]/g, ""); // Remove raw code newlines
+      // ---------------- RAW TEXT NODE ----------------
+      const text = node.textContent.trim();
+      if (!text) return;
 
-      node.innerHTML = `${indent}<i>${cleaned}</i>`;
-      node.dataset.ankiFmt = "1";
-      node.style.margin = "0";
-      node.style.padding = "0";
-      newNode = node;
+      const div = document.createElement("div");
+      div.dataset.ankiFmt = "1";
+      div.style.margin = "0";
+      div.innerHTML = `${indent}<i>${text}</i>`;
+      node.parentNode.replaceChild(div, node);
+      lastProcessed = div;
+    } else if (node.nodeType === 1) {
+      // --------- ELEMENT (DIV/P) -------------
+
+      // CHECK STATE: Is it actually formatted right now?
+      // We check for the attribute AND the presence of the indent
+      const hasAttr = node.dataset?.ankiFmt === "1";
+      const hasIndent =
+        node.innerHTML.startsWith(indent) ||
+        node.innerHTML.startsWith("&nbsp;&nbsp;&nbsp;&nbsp;");
+
+      if (hasAttr && hasIndent) {
+        // --- ACTION: UNFORMAT (Toggle Off) ---
+        let content = node.innerHTML;
+        // Remove indent
+        content = content.replace(/^(\u00A0|&nbsp;){4}/, "");
+        // Remove the outer <i>...</i> but keep the text inside
+        content = content.replace(/^<i>(.*)<\/i>$/i, "$1");
+
+        node.innerHTML = content;
+        delete node.dataset.ankiFmt;
+        node.style.margin = ""; // Restore default margin
+      } else {
+        // --- ACTION: FORMAT (Toggle On) ---
+        // Even if it has the attribute, if the indent is missing (user typed over it),
+        // we treat it as a fresh line and re-format it.
+        const inner = node.innerHTML
+          .replace(/<br\s*\/?>$/gi, "")
+          .replace(/[\n\r]/g, "")
+          .trim();
+
+        if (!inner) return;
+
+        node.innerHTML = `${indent}<i>${inner}</i>`;
+        node.dataset.ankiFmt = "1";
+        node.style.margin = "0";
+      }
+      lastProcessed = node;
     }
-    lastProcessed = newNode;
   });
 
-  // 5. Final Cleanup: Remove any rogue BRs that might have survived
-  // We do this twice: once now, once after a tiny delay to fight Anki's auto-BR.
+  // Cleanup redundant BRs
   const clean = () => {
     Array.from(editableRoot.childNodes).forEach((n) => {
-      if (n.nodeName === "BR" && n.previousSibling?.nodeName === "DIV") {
+      if (n.nodeName === "BR" && n.previousSibling?.nodeName === "DIV")
         n.remove();
-      }
     });
   };
-
   clean();
   setTimeout(clean, 20);
 
-  // 6. Restore Cursor
+  // Restore Cursor
   if (lastProcessed) {
     const newRange = document.createRange();
     newRange.selectNodeContents(lastProcessed);
