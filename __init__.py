@@ -1,72 +1,24 @@
-from aqt import mw, gui_hooks
+import os
+from aqt import gui_hooks
 from aqt.editor import Editor
-from aqt.utils import tooltip
 
-def format_line_physical(editor: Editor):
-    js = r"""
-    (function() {
-        function walkShadows(root, depth=0) {
-            const active = root.activeElement;
-            if (!active) return null;
-            if (active.contentEditable === 'true') return active;
-            if (active.shadowRoot) return walkShadows(active.shadowRoot, depth + 1);
-            return null;
-        }
+# Get the path to logic.js in the current addon folder
+ADDON_PATH = os.path.dirname(__file__)
+JS_FILE_PATH = os.path.join(ADDON_PATH, "logic.js")
 
-        const editableRoot = walkShadows(document);
-        if (!editableRoot) return "No editable root found";
+def run_custom_js(editor: Editor):
+    try:
+        # This reads the JS file fresh every time you press the shortcut
+        with open(JS_FILE_PATH, "r", encoding="utf-8") as f:
+            js_code = f.read()
+        
+        # Execute it in the editor's web context
+        editor.web.eval(js_code)
+    except Exception as e:
+        print(f"Error reading JS file: {e}")
 
-        const shadowRoot = editableRoot.getRootNode();
-        const sel = shadowRoot.getSelection ? shadowRoot.getSelection() : window.getSelection();
-        if (!sel || !sel.rangeCount) return "No selection";
+def on_setup_shortcuts(shortcuts: list[tuple], editor: Editor):
+    # CHANGED SHORTCUT TO Alt+Shift+Q
+    shortcuts.append(("Alt+Shift+Q", lambda: run_custom_js(editor)))
 
-        function getLineBlock(anchorNode, editableRoot) {
-            let node = anchorNode;
-            while (node && node.parentNode !== editableRoot) {
-                node = node.parentNode;
-            }
-            return node;
-        }
-
-        const lineBlock = getLineBlock(sel.anchorNode, editableRoot);
-        if (!lineBlock) return "No line block found";
-
-        try {
-            // Use the shadow root's document to create the range
-            const doc = lineBlock.ownerDocument;
-            const range = doc.createRange();
-            range.selectNodeContents(lineBlock);
-
-            sel.removeAllRanges();
-            sel.addRange(range);
-
-            // Extract and rewrap
-            const content = range.extractContents();
-            const temp = doc.createElement('div');
-            temp.appendChild(content);
-            const innerHtml = temp.innerHTML;
-
-            const wrapper = doc.createElement('span');
-            wrapper.innerHTML = '\u00A0\u00A0\u00A0\u00A0<i>' + innerHtml + '</i>';
-
-            range.insertNode(wrapper);
-
-            sel.removeAllRanges();
-            const newRange = doc.createRange();
-            newRange.setStartAfter(wrapper);
-            newRange.collapse(true);
-            sel.addRange(newRange);
-
-            return "Success";
-        } catch(e) {
-            return "Error: " + e.message;
-        }
-    })();
-    """
-    editor.web.evalWithCallback(js, lambda res: tooltip(res))
-
-def on_editor_init_shortcuts(shortcuts, editor: Editor):
-    shortcuts.append(("Ctrl+Shift+Q", lambda: format_line_physical(editor)))
-    shortcuts.append(("Alt+Q", lambda: format_line_physical(editor)))
-
-gui_hooks.editor_did_init_shortcuts.append(on_editor_init_shortcuts)
+gui_hooks.editor_did_init_shortcuts.append(on_setup_shortcuts)
