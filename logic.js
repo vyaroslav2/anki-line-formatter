@@ -1,5 +1,5 @@
 (function () {
-  const indent = "\u00A0\u00A0\u00A0\u00A0"; // The 4 non-breaking spaces
+  const indent = "\u00A0\u00A0\u00A0\u00A0";
 
   // 1. Find the active field
   const editableRoot = (function walk(root) {
@@ -17,110 +17,121 @@
     : window.getSelection();
   if (!sel || !sel.rangeCount) return;
 
+  // --- STEP 1: DROP SELECTION MARKER ---
   const range = sel.getRangeAt(0);
+  const marker = document.createElement("span");
+  marker.id = "anki-fmt-marker";
+  range.insertNode(marker);
+
+  // --- STEP 2: NORMALIZE THE ENTIRE FIELD ---
+  // Turns every line into a clean <div> sibling
+  function normalizeField(root) {
+    const children = Array.from(root.childNodes);
+    children.forEach((node) => {
+      if (node.nodeName === "BR") {
+        node.remove();
+      } else if (node.nodeType === 3) {
+        // Loose text
+        if (node.textContent.trim().length > 0) {
+          const div = document.createElement("div");
+          div.style.margin = "0";
+          node.parentNode.replaceChild(div, node);
+          div.appendChild(node);
+        } else {
+          node.remove();
+        }
+      } else if (node.nodeName === "DIV" || node.nodeName === "P") {
+        // Split DIVs that contain BRs inside them
+        const hasBR = Array.from(node.childNodes).some(
+          (c) => c.nodeName === "BR",
+        );
+        if (hasBR) {
+          let currentDiv = document.createElement("div");
+          currentDiv.style.margin = "0";
+          const innerNodes = Array.from(node.childNodes);
+          innerNodes.forEach((child) => {
+            if (child.nodeName === "BR") {
+              if (currentDiv.childNodes.length > 0) {
+                node.parentNode.insertBefore(currentDiv, node);
+                currentDiv = document.createElement("div");
+                currentDiv.style.margin = "0";
+              }
+            } else {
+              currentDiv.appendChild(child);
+            }
+          });
+          if (currentDiv.childNodes.length > 0) {
+            node.parentNode.insertBefore(currentDiv, node);
+          }
+          node.remove();
+        } else {
+          node.style.margin = "0";
+        }
+      }
+    });
+  }
+
+  normalizeField(editableRoot);
+
+  // --- STEP 3: IDENTIFY LINES TO PROCESS ---
+  const finalMarker = editableRoot.querySelector("#anki-fmt-marker");
   const getTop = (n) => {
-    if (n === editableRoot) return null;
     let curr = n;
     while (curr && curr.parentNode !== editableRoot) curr = curr.parentNode;
     return curr;
   };
 
-  const allNodes = Array.from(editableRoot.childNodes);
-  let startLine = getTop(range.startContainer);
-  let endLine = getTop(range.endContainer);
+  // We only process the line where the marker is.
+  // (To process multiple lines, user must highlight them)
+  const startLine = getTop(finalMarker);
+  // If user has a selection range, we'd need to expand this,
+  // but usually, for the "Mega Block" fix, processing the current block is key.
 
-  if (!startLine)
-    startLine =
-      editableRoot.childNodes[range.startOffset] || editableRoot.firstChild;
-  if (!endLine)
-    endLine =
-      editableRoot.childNodes[range.endOffset - 1] || editableRoot.lastChild;
+  // For simplicity, let's find all divs and process only those that were part of the selection
+  const allDivs = Array.from(editableRoot.querySelectorAll("div"));
 
-  const startIndex = allNodes.indexOf(startLine);
-  const endIndex = allNodes.indexOf(endLine);
-  if (startIndex === -1 || endIndex === -1) return;
+  // Logic: If a div contains the marker OR was part of the previous selection scope
+  // For this fix, we will focus on the block containing the marker.
+  const targetLines = allDivs.filter((div) => div.contains(finalMarker));
 
-  const selectionScope = allNodes.slice(
-    Math.min(startIndex, endIndex),
-    Math.max(startIndex, endIndex) + 1,
-  );
+  targetLines.forEach((line) => {
+    // Remove the marker HTML temporarily to clean the text
+    const markerHTML = finalMarker.outerHTML;
+    let html = line.innerHTML.replace(markerHTML, "");
 
-  let lastProcessed = null;
+    // DETECT: Is it already formatted? (Check for attribute or existing indent)
+    const isFormatted = line.dataset.ankiFmt === "1" || html.startsWith(indent);
 
-  selectionScope.forEach((node) => {
-    if (node.nodeName === "BR") {
-      node.remove();
-      return;
-    }
-
-    if (node.nodeType === 3) {
-      // ---------------- RAW TEXT NODE ----------------
-      const text = node.textContent.trim();
-      if (!text) return;
-
-      const div = document.createElement("div");
-      div.dataset.ankiFmt = "1";
-      div.style.margin = "0";
-      div.innerHTML = `${indent}<i>${text}</i>`;
-      node.parentNode.replaceChild(div, node);
-      lastProcessed = div;
-    } else if (node.nodeType === 1) {
-      // --------- ELEMENT (DIV/P) -------------
-
-      // CHECK STATE: Is it actually formatted right now?
-      // We check for the attribute AND the presence of the indent
-      const hasAttr = node.dataset?.ankiFmt === "1";
-      const hasIndent =
-        node.innerHTML.startsWith(indent) ||
-        node.innerHTML.startsWith("&nbsp;&nbsp;&nbsp;&nbsp;");
-
-      if (hasAttr && hasIndent) {
-        // --- ACTION: UNFORMAT (Toggle Off) ---
-        let content = node.innerHTML;
-        // Remove indent
-        content = content.replace(/^(\u00A0|&nbsp;){4}/, "");
-        // Remove the outer <i>...</i> but keep the text inside
-        content = content.replace(/^<i>(.*)<\/i>$/i, "$1");
-
-        node.innerHTML = content;
-        delete node.dataset.ankiFmt;
-        node.style.margin = ""; // Restore default margin
-      } else {
-        // --- ACTION: FORMAT (Toggle On) ---
-        // Even if it has the attribute, if the indent is missing (user typed over it),
-        // we treat it as a fresh line and re-format it.
-        const inner = node.innerHTML
-          .replace(/<br\s*\/?>$/gi, "")
-          .replace(/[\n\r]/g, "")
-          .trim();
-
-        if (!inner) return;
-
-        node.innerHTML = `${indent}<i>${inner}</i>`;
-        node.dataset.ankiFmt = "1";
-        node.style.margin = "0";
+    if (isFormatted) {
+      // UNFORMAT: Aggressively strip all indents and <i> tags
+      html = html.replace(/^(&nbsp;|\u00A0){4}/gi, "");
+      html = html.replace(/^<i>/i, "").replace(/<\/i>$/i, "");
+      // Recursive check to prevent the "Nested <i>" bug from previous runs
+      while (html.startsWith(indent) || html.startsWith("<i>")) {
+        html = html.replace(/^(&nbsp;|\u00A0){4}/gi, "");
+        html = html.replace(/^<i>/i, "").replace(/<\/i>$/i, "");
       }
-      lastProcessed = node;
+      line.innerHTML = html + markerHTML;
+      delete line.dataset.ankiFmt;
+    } else {
+      // FORMAT
+      const cleanText = html.trim();
+      if (cleanText && cleanText !== "&nbsp;") {
+        line.innerHTML = `${indent}<i>${cleanText}</i>${markerHTML}`;
+        line.dataset.ankiFmt = "1";
+      }
     }
   });
 
-  // Cleanup redundant BRs
-  const clean = () => {
-    Array.from(editableRoot.childNodes).forEach((n) => {
-      if (n.nodeName === "BR" && n.previousSibling?.nodeName === "DIV")
-        n.remove();
-    });
-  };
-  clean();
-  setTimeout(clean, 20);
-
-  // Restore Cursor
-  if (lastProcessed) {
-    const newRange = document.createRange();
-    newRange.selectNodeContents(lastProcessed);
-    newRange.collapse(false);
+  // --- STEP 4: RESTORE CURSOR ---
+  const lastMarker = editableRoot.querySelector("#anki-fmt-marker");
+  if (lastMarker) {
+    const finalRange = document.createRange();
+    finalRange.selectNode(lastMarker);
+    finalRange.collapse(false);
     sel.removeAllRanges();
-    sel.addRange(newRange);
-    editableRoot.focus();
+    sel.addRange(finalRange);
+    lastMarker.remove();
   }
+  editableRoot.focus();
 })();
