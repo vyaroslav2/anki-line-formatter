@@ -1,5 +1,6 @@
 (function () {
   const indent = "\u00A0\u00A0\u00A0\u00A0";
+  const indentRegex = /^(?:<span[^>]*><\/span>)*(?:\s|&nbsp;|\u00A0){4}/i;
 
   const editableRoot = (function walk(root) {
     const active = root.activeElement;
@@ -30,53 +31,68 @@
   eRange.collapse(false);
   eRange.insertNode(endMarker);
 
-  // --- STEP 2: NUCLEAR FLATTENING ---
+  // --- STEP 2: STABLE NORMALIZATION ---
   function normalize(root) {
-    // 1. Convert all <br> to actual block breaks
-    const brs = Array.from(root.querySelectorAll("br"));
-    brs.forEach((br) => {
+    // 1. Clean Clozes
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_TEXT,
+      null,
+      false,
+    );
+    let node;
+    const clozes = [];
+    while ((node = walker.nextNode())) {
+      if (node.nodeValue.includes("{{c")) clozes.push(node);
+    }
+    clozes.forEach((n) => {
+      n.nodeValue = n.nodeValue.replace(/{{c\d+::(.*?)(?:::(?:.*?))?}}/g, "$1");
+    });
+
+    // 2. Split on <br> (Enhanced to handle <b>Header<br></b>)
+    let br;
+    while ((br = root.querySelector("br"))) {
       const splitRange = document.createRange();
       splitRange.setStartAfter(br);
       let top = br.parentNode;
       while (top && top.parentNode !== root) top = top.parentNode;
+
       if (top) {
         splitRange.setEndAfter(top);
         const fragment = splitRange.extractContents();
         const newDiv = document.createElement("div");
         newDiv.appendChild(fragment);
-        top.parentNode.insertBefore(newDiv, top.nextSibling);
+        root.insertBefore(newDiv, top.nextSibling);
       }
       br.remove();
-    });
-
-    // 2. Shred all nested blocks. Every <div> or <p> must be a direct child of root.
-    let nestedBlock;
-    while ((nestedBlock = root.querySelector("div div, div p, p div, p p"))) {
-      const parent = nestedBlock.parentNode;
-      const referenceNode = nestedBlock.nextSibling;
-      // Move children of the nested block to the level of the parent
-      while (nestedBlock.firstChild) {
-        parent.parentNode.insertBefore(
-          nestedBlock.firstChild,
-          parent.nextSibling,
-        );
-      }
-      nestedBlock.remove();
     }
 
-    // 3. Ensure everything at the root is wrapped in a clean <div>
-    let inlineGroup = [];
+    // 3. Flatten nested block elements
+    let nested;
+    while (
+      (nested = root.querySelector("div > div, div > p, p > div, p > p"))
+    ) {
+      const wrapper = nested.parentNode;
+      const fragment = document.createDocumentFragment();
+      while (wrapper.firstChild) fragment.appendChild(wrapper.firstChild);
+      wrapper.replaceWith(fragment);
+    }
+
+    // 4. Wrap orphans and clean empty bold/italic tags
     const children = Array.from(root.childNodes);
+    let group = [];
     children.forEach((node) => {
-      if (node.nodeName === "DIV" || node.nodeName === "P") {
-        if (inlineGroup.length > 0) wrap(inlineGroup);
-        inlineGroup = [];
+      const isBlock =
+        node.nodeType === 1 && ["DIV", "P"].includes(node.nodeName);
+      if (isBlock) {
+        if (group.length > 0) wrap(group);
+        group = [];
         node.style.margin = "0";
       } else {
-        inlineGroup.push(node);
+        group.push(node);
       }
     });
-    if (inlineGroup.length > 0) wrap(inlineGroup);
+    if (group.length > 0) wrap(group);
 
     function wrap(nodes) {
       const div = document.createElement("div");
@@ -85,100 +101,95 @@
       nodes.forEach((n) => div.appendChild(n));
     }
 
-    // 4. Remove empty wrapper divs that contain no text/markers
-    Array.from(root.childNodes).forEach((node) => {
-      if (
-        node.nodeType === 1 &&
-        node.innerHTML.trim() === "" &&
-        !node.querySelector("span")
-      ) {
-        node.remove();
-      }
+    // Clean ghost tags
+    root.querySelectorAll("b, i").forEach((el) => {
+      if (el.innerHTML.trim() === "" || el.innerHTML === "&nbsp;") el.remove();
     });
   }
 
-  normalize(editableRoot);
+  try {
+    normalize(editableRoot);
 
-  // --- STEP 3: PROCESS FLAT LINES ---
-  const sMarker = editableRoot.querySelector(".anki-fmt-start");
-  const eMarker = editableRoot.querySelector(".anki-fmt-end");
-  if (!sMarker || !eMarker) return;
+    const sMarker = editableRoot.querySelector(".anki-fmt-start");
+    const eMarker = editableRoot.querySelector(".anki-fmt-end");
+    if (!sMarker || !eMarker) throw new Error("Markers lost");
 
-  const getTop = (n) => {
-    let curr = n;
-    while (curr && curr.parentNode !== editableRoot) curr = curr.parentNode;
-    return curr;
-  };
+    const getLine = (n) =>
+      n && n.parentNode === editableRoot ? n : getLine(n.parentNode);
+    const allLines = Array.from(editableRoot.childNodes);
+    let low = allLines.indexOf(getLine(sMarker));
+    let high = allLines.indexOf(getLine(eMarker));
+    if (low > high) [low, high] = [high, low];
 
-  const startLine = getTop(sMarker);
-  const endLine = getTop(eMarker);
-  const allNodes = Array.from(editableRoot.childNodes);
-  const low = allNodes.indexOf(startLine);
-  const high = allNodes.indexOf(endLine);
+    const checkIsHeader = (line) => {
+      if (!line || line.nodeType !== 1) return false;
+      const text = line.innerText.trim();
+      const b = line.querySelector("b");
+      return b && text.length > 0 && text === b.innerText.trim();
+    };
 
-  if (low !== -1 && high !== -1) {
-    const scope = allNodes.slice(Math.min(low, high), Math.max(low, high) + 1);
+    // Expand scope if header
+    if (low === high && checkIsHeader(allLines[low])) {
+      for (let i = low + 1; i < allLines.length; i++) {
+        if (checkIsHeader(allLines[i])) break;
+        high = i;
+      }
+    }
 
-    // Toggle Logic: find first line with text to decide
-    const firstTextLine = scope.find((l) => l.innerText.trim().length > 0);
+    const scope = allLines.slice(low, high + 1);
+
+    // REFINED TOGGLE LOGIC:
+    // Is formatted ONLY if it has BOTH 4 spaces AND italics/attribute
+    const refLine =
+      scope.find((l) => l.innerText.trim().length > 0 && !checkIsHeader(l)) ||
+      scope[0];
+    const hasIndent = indentRegex.test(refLine.innerHTML.trim());
+    const hasItalics = refLine.querySelector("i") !== null;
     const shouldUnformat =
-      firstTextLine &&
-      (firstTextLine.innerHTML.includes(indent) ||
-        firstTextLine.dataset.ankiFmt === "1");
+      (hasIndent && hasItalics) || refLine.dataset.ankiFmt === "1";
 
     scope.forEach((line) => {
       if (line.nodeType !== 1) return;
 
-      // Clean HTML from previous formatting attempts
       let html = line.innerHTML;
       let lastHtml = "";
       while (html !== lastHtml) {
         lastHtml = html;
-        // Remove 4-space indents
         html = html.replace(
-          /^((?:<span.*?<\/span>)*)(?:\s|&nbsp;|\u00A0){1,4}/gi,
+          /^((?:<span class="anki-fmt-(?:start|end)"><\/span>)*)(?:\s|&nbsp;|\u00A0){1,4}/gi,
           "$1",
         );
-        // Remove <i> and </i> tags
         html = html.replace(/<\/?i>/gi, "");
       }
 
-      // Detection: Is it a bold header?
-      const isBoldHeader =
-        line.innerHTML.trim().startsWith("<b>") &&
-        line.innerHTML.trim().endsWith("</b>");
-      const hasContent = line.innerText.trim().length > 0;
-
       if (!shouldUnformat) {
-        // Apply if it's text and NOT a bold header
-        if (hasContent && !isBoldHeader) {
+        if (line.innerText.trim().length > 0 && !checkIsHeader(line)) {
           line.innerHTML = `${indent}<i>${html}</i>`;
           line.dataset.ankiFmt = "1";
         } else {
-          line.innerHTML = html; // Keep headers clean
+          line.innerHTML = html;
         }
       } else {
-        line.innerHTML = html; // Restore cleaned version
+        line.innerHTML = html;
         delete line.dataset.ankiFmt;
       }
     });
-  }
 
-  // --- STEP 4: RESTORE SELECTION ---
-  const finalStart = editableRoot.querySelector(".anki-fmt-start");
-  const finalEnd = editableRoot.querySelector(".anki-fmt-end");
-  if (finalStart && finalEnd) {
-    const finalRange = document.createRange();
-    try {
+    const finalStart = editableRoot.querySelector(".anki-fmt-start");
+    const finalEnd = editableRoot.querySelector(".anki-fmt-end");
+    if (finalStart && finalEnd) {
+      const finalRange = document.createRange();
       finalRange.setStartAfter(finalStart);
       finalRange.setEndBefore(finalEnd);
       sel.removeAllRanges();
       sel.addRange(finalRange);
-    } catch (e) {}
+    }
+  } catch (e) {
+    console.error(e);
+  } finally {
+    editableRoot
+      .querySelectorAll(".anki-fmt-start, .anki-fmt-end")
+      .forEach((m) => m.remove());
+    editableRoot.focus();
   }
-
-  editableRoot
-    .querySelectorAll(".anki-fmt-start, .anki-fmt-end")
-    .forEach((m) => m.remove());
-  editableRoot.focus();
 })();
