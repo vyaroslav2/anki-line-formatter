@@ -36,7 +36,7 @@
 
   // --- STEP 2: STABLE NORMALIZATION ---
   function normalize(root) {
-    // 1. Clean Clozes
+    // 1. Clean Clozes (Anki internal formatting)
     const walker = document.createTreeWalker(
       root,
       NodeFilter.SHOW_TEXT,
@@ -52,13 +52,18 @@
       n.nodeValue = n.nodeValue.replace(/{{c\d+::(.*?)(?:::(?:.*?))?}}/g, "$1");
     });
 
-    // 2. Flatten into a list of nodes separated by BRs
+    // 2. Flatten into a list of nodes
     let allNodes = [];
     const process = (nodes) => {
       Array.from(nodes).forEach((node) => {
         if (node.nodeName === "DIV" || node.nodeName === "P") {
+          if (
+            allNodes.length > 0 &&
+            allNodes[allNodes.length - 1].nodeName !== "BR"
+          ) {
+            allNodes.push(document.createElement("br"));
+          }
           process(node.childNodes);
-          // Add a line break marker only if the previous node wasn't already a break
           if (
             allNodes.length > 0 &&
             allNodes[allNodes.length - 1].nodeName !== "BR"
@@ -72,39 +77,37 @@
     };
     process(root.childNodes);
 
+    // 3. Reconstruct Divs (The Fix is here)
     root.innerHTML = "";
-
-    // 3. Reconstruct Divs (This preserves your manual blank lines)
     let currentDiv = document.createElement("div");
     currentDiv.style.margin = "0";
     root.appendChild(currentDiv);
 
-    allNodes.forEach((node) => {
+    allNodes.forEach((node, index) => {
       if (node.nodeName === "BR") {
-        if (currentDiv.childNodes.length === 0) currentDiv.innerHTML = "<br>";
-        currentDiv = document.createElement("div");
-        currentDiv.style.margin = "0";
-        root.appendChild(currentDiv);
+        // If current div is empty, give it a <br> so it has height
+        if (currentDiv.childNodes.length === 0) {
+          currentDiv.innerHTML = "<br>";
+        }
+
+        // BUG FIX: Only create a NEW div if this is NOT the last node in the list.
+        // This prevents the trailing blank line.
+        if (index < allNodes.length - 1) {
+          currentDiv = document.createElement("div");
+          currentDiv.style.margin = "0";
+          root.appendChild(currentDiv);
+        }
       } else {
         currentDiv.appendChild(node);
       }
     });
 
-    // Final safety: if the last div is empty, make it a <br>
-    if (currentDiv.childNodes.length === 0) {
-      currentDiv.innerHTML = "<br>";
-    }
+    // Final safety: ensure every line has content so it doesn't collapse
+    root.querySelectorAll("div").forEach((div) => {
+      if (div.innerHTML.trim() === "") div.innerHTML = "<br>";
+    });
 
-    // Remove extra trailing empty div if it's redundant
-    if (
-      root.childNodes.length > 1 &&
-      root.lastChild.innerHTML === "<br>" &&
-      root.lastChild.previousSibling.innerHTML === "<br>"
-    ) {
-      root.lastChild.remove();
-    }
-
-    // Clean ghost formatting tags (like empty bold tags from copy-paste)
+    // Clean ghost formatting tags
     root.querySelectorAll("b, i").forEach((el) => {
       if (el.innerText.trim() === "" && !el.querySelector("span")) el.remove();
     });
@@ -139,6 +142,7 @@
       );
     };
 
+    // Auto-expand scope if starting on a header
     if (low === high && checkIsHeader(allLines[low])) {
       for (let i = low + 1; i < allLines.length; i++) {
         if (checkIsHeader(allLines[i])) break;
@@ -164,6 +168,7 @@
 
       let html = line.innerHTML;
       let lastHtml = "";
+      // Strip existing formatting/indentation to normalize
       while (html !== lastHtml) {
         lastHtml = html;
         html = html.replace(
@@ -188,6 +193,7 @@
       if (line.innerHTML.trim() === "") line.innerHTML = "<br>";
     });
 
+    // Restore Selection
     const finalStart = editableRoot.querySelector(".anki-fmt-start");
     const finalEnd = editableRoot.querySelector(".anki-fmt-end");
     if (finalStart && finalEnd) {
@@ -203,6 +209,7 @@
   } catch (e) {
     console.error("FORMATTER ERROR:", e);
   } finally {
+    // Cleanup Markers
     editableRoot
       .querySelectorAll(".anki-fmt-start, .anki-fmt-end")
       .forEach((m) => m.remove());
